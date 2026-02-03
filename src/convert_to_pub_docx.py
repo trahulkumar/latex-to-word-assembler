@@ -364,7 +364,7 @@ def post_process_docx(docx_path):
     update_style('Heading 2', font_name="Lora", font_size=20, bold=True, space_before=42, space_after=18)
     
     # Heading 3 (Subsection 1.1.1): Lora 16 Bold, Justified (User request: 16pt)
-    update_style('Heading 3', font_name="Lora", font_size=16, bold=True, space_before=24, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
+    update_style('Heading 3', font_name="Lora", font_size=12, bold=True, space_before=24, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
 
     # Code Blocks (Source Code): Left Aligned
     # Pandoc usually maps verbatims to "Source Code"
