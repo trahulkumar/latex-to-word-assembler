@@ -208,7 +208,8 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
         extra_args = [
             '--number-sections', 
             f'--resource-path={resource_path}',
-            '--top-level-division=chapter'
+            '--top-level-division=chapter',
+            f'--number-offset={int(chapter_num)-1}'
         ]
         
         print(f"  Combining {len(final_files)} files into {output_path}...")
@@ -366,6 +367,9 @@ def post_process_docx(docx_path):
     # Heading 3 (Subsection 1.1.1): Lora 16 Bold, Justified (User request: 16pt)
     update_style('Heading 3', font_name="Lora", font_size=12, bold=True, space_before=24, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
 
+    # Heading 4 (Sub-subsection 1.1.1.1): Lora 11 Bold
+    update_style('Heading 4', font_name="Lora", font_size=11, bold=True, space_before=12, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
+
     # Code Blocks (Source Code): Left Aligned
     # Pandoc usually maps verbatims to "Source Code"
     update_style('Source Code', font_name="Consolas", font_size=10, align=WD_PARAGRAPH_ALIGNMENT.LEFT)
@@ -449,9 +453,17 @@ def post_process_docx(docx_path):
             first_h1_removed = True
             break
 
+    # Pre-pass: Identify the LAST "Conclusion" subsection to promote
+    target_conclusion_index = -1
+    for i, p in enumerate(doc.paragraphs):
+        if p.style.name == 'Heading 3':
+            # Match "1.2.3 Conclusion" or "Conclusion" with spaces/tabs
+            if re.search(r'^\s*[\d\.]+\s+Conclusion\s*$', p.text, re.IGNORECASE) or p.text.strip().lower() == "conclusion":
+                target_conclusion_index = i
+
     # 3. Center Align Images and handle captions if manual
     # Also iterate to apply Aggressive Font/Spacing Fixes for Headings
-    for paragraph in doc.paragraphs:
+    for i, paragraph in enumerate(doc.paragraphs):
         # Check for images (drawings)
         if 'w:drawing' in paragraph._element.xml or 'w:pict' in paragraph._element.xml:
             paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -464,8 +476,20 @@ def post_process_docx(docx_path):
                  run.font.size = Pt(9)
                  run.font.italic = True
         
+        # Special Case: Promote "Conclusion" subsection to Section (Unnumbered)
+        # Only for the LAST instance found in the chapter
+        if i == target_conclusion_index:
+            print(f"  Promoting Conclusion subsection: {paragraph.text.strip()}")
+            paragraph.style = doc.styles['Heading 2']
+            paragraph.text = "Conclusion"
+            try:
+                if paragraph._p.pPr is not None and paragraph._p.pPr.numPr is not None:
+                     paragraph._p.pPr.remove(paragraph._p.pPr.numPr)
+            except Exception:
+                pass
+        
         # Aggressive Heading Fixes (Spacing and Font)
-        if paragraph.style.name in ['Heading 2', 'Heading 3', 'Heading 1']:
+        if paragraph.style.name in ['Heading 2', 'Heading 3', 'Heading 1', 'Heading 4']:
             # 1. Fix Tab Spacing in Text (Manually numbered by Pandoc?)
             if '\t' in paragraph.text:
                 # Replace tab with space
@@ -485,7 +509,9 @@ def post_process_docx(docx_path):
                 elif paragraph.style.name == 'Heading 2':
                     run.font.size = Pt(20)
                 elif paragraph.style.name == 'Heading 3':
-                    run.font.size = Pt(16)
+                    run.font.size = Pt(12)
+                elif paragraph.style.name == 'Heading 4':
+                    run.font.size = Pt(11)
                     
                 # Explicitly clear Theme fonts in XML if possible, 
                 # but run.font.name usually writes w:rFonts w:ascii="Lora" etc.
