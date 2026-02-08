@@ -81,6 +81,14 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
         citation_pattern = re.compile(r'\\(cite|citep|citet|ref)\{[^}]+\}|\[cite:[^\]]+\]|\[cite_start\]')
         graphics_pattern = re.compile(r'\\includegraphics(?:\[(.*?)\])?\{(.*?)\}')
 
+        # Publisher Style Patterns
+        regex_eg = re.compile(r'\be\.g\.', re.IGNORECASE)
+        regex_vs = re.compile(r'\bvs\.', re.IGNORECASE)
+        regex_title_colon = re.compile(r'\\(section|subsection|subsubsection|paragraph)\{([^}]+):\s*\}')
+        regex_caption_period = re.compile(r'(\\caption\{((?:[^{}]|\{[^{}]*\})*))\.\s*\}')
+        regex_fig_ref_explicit = re.compile(r'\b(Figure|Table)\s+(\d+\.\d+)')
+        regex_fig_ref_latex = re.compile(r'\b(Figure|Table)(~|\s+)(\\ref\{[^}]+\})')
+
         available_images = {}
         # heuristic: match on "figure_d_d"
         prefix_map = {}
@@ -153,6 +161,19 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                 cleaned_content = citation_pattern.sub('', content)
                 cleaned_content = figure_block_pattern.sub(process_figure_block, cleaned_content)
                 cleaned_content = graphics_pattern.sub(resolve_inline_image, cleaned_content)
+
+                # Publisher Style Replacements
+                cleaned_content = regex_eg.sub("for example", cleaned_content)
+                cleaned_content = regex_vs.sub("versus", cleaned_content)
+                cleaned_content = regex_title_colon.sub(r'\\\1{\2}', cleaned_content)
+                cleaned_content = regex_caption_period.sub(r'\1}', cleaned_content)
+                
+                # Italicize Figure/Table references
+                # Explicit: Figure 1.1 -> \textit{Figure 1.1}
+                cleaned_content = regex_fig_ref_explicit.sub(lambda m: f"\\textit{{{m.group(1)} {m.group(2)}}}", cleaned_content)
+                # Latex Ref: Figure~\ref{...} -> \textit{Figure~\ref{...}}
+                cleaned_content = regex_fig_ref_latex.sub(lambda m: f"\\textit{{{m.group(1)}{m.group(2)}{m.group(3)}}}", cleaned_content)
+
                 cleaned_content = cleaned_content.replace("``", '"').replace("''", '"')
                 cleaned_content = cleaned_content.replace("—", "-")
                 cleaned_content = cleaned_content.replace("**", "")
@@ -206,10 +227,8 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
         resource_path = f"{abs_chapter_dir};{os.path.join(abs_chapter_dir, 'images')}"
         
         extra_args = [
-            '--number-sections', 
             f'--resource-path={resource_path}',
-            '--top-level-division=chapter',
-            f'--number-offset={int(chapter_num)-1}'
+            '--top-level-division=chapter'
         ]
         
         print(f"  Combining {len(final_files)} files into {output_path}...")
@@ -359,16 +378,19 @@ def post_process_docx(docx_path):
     # Heading 1 (General use in doc, maybe for Chapter Title repeats): Lora 24 Bold
     update_style('Heading 1', font_name="Lora", font_size=24, bold=True, space_before=24, space_after=24)
     
-    # Heading 2 (Section 1.1): Lora 20 Bold
+    # Heading 2 (Section): Lora 20 Bold
     # Increased spacing per user request: "start of new section add space before... end of each section add space after"
     # Interpreted as increased margins around the header.
     update_style('Heading 2', font_name="Lora", font_size=20, bold=True, space_before=42, space_after=18)
     
-    # Heading 3 (Subsection 1.1.1): Lora 16 Bold, Justified (User request: 16pt)
-    update_style('Heading 3', font_name="Lora", font_size=12, bold=True, space_before=24, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
+    # Heading 3 (Subsection): Lora 18 Bold (User request: 18pt)
+    update_style('Heading 3', font_name="Lora", font_size=18, bold=True, space_before=24, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
 
-    # Heading 4 (Sub-subsection 1.1.1.1): Lora 11 Bold
-    update_style('Heading 4', font_name="Lora", font_size=11, bold=True, space_before=12, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
+    # Heading 4 (Sub-subsection): Lora 16 Bold (User request: 16pt)
+    update_style('Heading 4', font_name="Lora", font_size=16, bold=True, space_before=12, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
+
+    # Heading 5: Lora 14 Bold (User request: 14pt)
+    update_style('Heading 5', font_name="Lora", font_size=14, bold=True, space_before=12, space_after=12, align=WD_PARAGRAPH_ALIGNMENT.JUSTIFY)
 
     # Code Blocks (Source Code): Left Aligned
     # Pandoc usually maps verbatims to "Source Code"
@@ -410,7 +432,7 @@ def post_process_docx(docx_path):
             for run in p.runs:
                 run.font.name = "Lora"
                 run.font.size = Pt(35)
-                run.font.bold = True
+                run.font.bold = False
                 run.font.color.rgb = accent_color
             found_chapter_num = True
             continue
@@ -509,9 +531,11 @@ def post_process_docx(docx_path):
                 elif paragraph.style.name == 'Heading 2':
                     run.font.size = Pt(20)
                 elif paragraph.style.name == 'Heading 3':
-                    run.font.size = Pt(12)
+                    run.font.size = Pt(18)
                 elif paragraph.style.name == 'Heading 4':
-                    run.font.size = Pt(11)
+                    run.font.size = Pt(16)
+                elif paragraph.style.name == 'Heading 5':
+                    run.font.size = Pt(14)
                     
                 # Explicitly clear Theme fonts in XML if possible, 
                 # but run.font.name usually writes w:rFonts w:ascii="Lora" etc.
