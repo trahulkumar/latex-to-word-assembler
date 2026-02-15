@@ -80,6 +80,10 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
         
         citation_pattern = re.compile(r'\\(cite|citep|citet|ref)\{[^}]+\}|\[cite:[^\]]+\]|\[cite_start\]')
         graphics_pattern = re.compile(r'\\includegraphics(?:\[(.*?)\])?\{(.*?)\}')
+        
+        # Store references for consolidation
+        references = {}
+
 
         # Publisher Style Patterns
         regex_eg = re.compile(r'\be\.g\.', re.IGNORECASE)
@@ -123,26 +127,112 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
 
         def process_figure_block(match):
             full_block = match.group(1)
-            prompt_comment = match.group(2) or ""
             
+            # Extract Placeholder Title
+            placeholder_text = "Unknown Placeholder"
+            placeholder_match = re.search(r'\\textbf\{Figure Placeholder:\s*(.*?)\}', full_block, re.IGNORECASE)
+            if placeholder_match:
+                placeholder_text = placeholder_match.group(1).strip()
+            
+            # Extract Caption
+            caption = ""
+            caption_start = full_block.find(r'\caption{')
+            if caption_start != -1:
+                # Manual brace counting to handle nested braces like \texttt{...}
+                content_start = caption_start + len(r'\caption{')
+                brace_count = 1
+                current_pos = content_start
+                while brace_count > 0 and current_pos < len(full_block):
+                    if full_block[current_pos] == '{':
+                        brace_count += 1
+                    elif full_block[current_pos] == '}':
+                        brace_count -= 1
+                    current_pos += 1
+                
+                if brace_count == 0:
+                    caption = full_block[content_start:current_pos-1].strip()
+                    # Basic cleanup
+                    caption = caption.replace('\n', ' ').replace('  ', ' ')
+
+            
+            # Extract Label
+            label = ""
+            label_match = re.search(r'\\label\{(.*?)\}', full_block)
+            if label_match:
+                label = label_match.group(1).strip()
+
+            # Extract Prompt Comments
+            # Find all lines starting with % inside the block
+            prompts = []
+            for line in full_block.split('\n'):
+                 if line.strip().startswith('%'):
+                     prompts.append(line.strip())
+            prompt_text = "\n".join(prompts)
+
+
             g_match = graphics_pattern.search(full_block)
-            if not g_match:
-                return match.group(0) 
             
-            options = g_match.group(1)
-            ref_path = g_match.group(2)
+            # Logic: If image exists, show image AND details? 
+            # User request: "Bring the entire figure section ... into the final latex and word file... show it in red"
+            # This implies they want to see the metadata (prompt, placeholder) even if the image exists? 
+            # Or is this specifically for the placeholder case? 
+            # The user's snippet shows a placeholder block. 
+            # Let's assume this is for ANY figure block that matches our pattern, likely mostly placeholders.
+            # But if a real image is there, we probably still want the image + details if requested?
+            # Actually, standard behavior is Image + Caption. 
+            # The User's request specifically cites the *placeholder* block example.
+            # So I will prioritize the placeholder text if found. 
             
-            target_file = find_target_image(ref_path)
+            # Construct the Red Block text.
+            # We prefix with [FIGURE DETAIL] so post-processing can color it red.
+            # We use Markdown bold ** for keys.
             
-            if target_file:
-                new_tag = f'\\includegraphics[{options}]{{{target_file}}}' if options else f'\\includegraphics{{{target_file}}}'
-                s, e = g_match.span()
-                new_block = full_block[:s] + new_tag + full_block[e:]
-                return new_block + prompt_comment
-            else:
-                combined = full_block + prompt_comment
-                commented = "\n".join([f"% {line}" for line in combined.split('\n')])
-                return f"\n% [MISSING IMAGE: {ref_path}] - Block Corrected\n{commented}\n"
+            details_block = (
+                f"\n\n[FIGURE DETAIL] **Figure Placeholder:** {placeholder_text}\n"
+                f"[FIGURE DETAIL] **Ref Label:** {label}\n"
+                f"[FIGURE DETAIL] **Prompt Information:**\n"
+            )
+            
+            # Process prompt lines to be distinctive
+            for p in prompts:
+                # Escape the % so it appears as text in LaTeX/DOCX, not a comment
+                # Also escape other special latex chars if needed? 
+                # For now, just handling the leading % which effectively hides the line.
+                # Actually, p is the whole line including the %. 
+                # e.g. "% Prompt: ..."
+                # We want it to be "\% Prompt: ..." in the latex source so it renders as "% Prompt: ..."
+                escaped_p = p.replace('%', '\\%')
+                details_block += f"[FIGURE DETAIL] {escaped_p}\n"
+
+            
+            details_block += f"[FIGURE DETAIL] **Caption:** {caption}\n\n"
+
+            # If an image exists, we might want to show it too? 
+            # If it's a true placeholder block (as in the example), it likely has a PLACEHOLDER image or fbox.
+            # If we replace the whole block with text, we lose the fbox, which is fine as the text covers it.
+            # If there is a real \includegraphics, we should probably keep it and append details?
+            # But the request says "Bring the entire figure section... into the final latex... show it in red".
+            # Loops like they want the Source/Metadata visible.
+            
+            if g_match:
+                 options = g_match.group(1)
+                 ref_path = g_match.group(2)
+                 target_file = find_target_image(ref_path)
+                 if target_file:
+                     # It's a real image. Return the FULL original block with the updated path.
+                     # Do NOT append details_block (red text) for valid images.
+                     new_tag = f'\\includegraphics[{options}]{{{target_file}}}' if options else f'\\includegraphics{{{target_file}}}'
+                     s, e = g_match.span()
+                     new_block = full_block[:s] + new_tag + full_block[e:]
+                     return new_block + prompt_comment
+                 else:
+                     # Missing image
+                     return f"\n\n**[MISSING IMAGE: {ref_path}]**\n{details_block}"
+
+            
+            # If no graphics match (just fbox/text placeholder), return the details block
+            return details_block
+
 
         def resolve_inline_image(match):
             options = match.group(1)
@@ -161,6 +251,30 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                 cleaned_content = citation_pattern.sub('', content)
                 cleaned_content = figure_block_pattern.sub(process_figure_block, cleaned_content)
                 cleaned_content = graphics_pattern.sub(resolve_inline_image, cleaned_content)
+
+                # Remove redundant References headers (since we are consolidating them)
+                cleaned_content = re.sub(r'\\(section|subsection|subsubsection)\*?\{References\}\s*', '', cleaned_content, flags=re.IGNORECASE)
+
+
+
+                # Reference Extraction
+                # Find \begin{thebibliography}... \end{thebibliography} blocks
+                # Extract bibitems and remove the block from content
+                bib_block_pattern = re.compile(r'(\\begin\{thebibliography\}\{.*?\}(.*?)\\end\{thebibliography\})', re.DOTALL)
+                bib_item_pattern = re.compile(r'\\bibitem\{([^}]+)\}(.*?)(?=\\bibitem|\Z)', re.DOTALL)
+
+                def process_bib_block(match):
+                    block_content = match.group(2)
+                    items = bib_item_pattern.findall(block_content)
+                    for key, text in items:
+                        # Clean up text (remove newlines, extra spaces)
+                        clean_text = " ".join(text.split()).strip()
+                        if key not in references:
+                            references[key] = clean_text
+                    return "" # Remove the block from the file
+
+                cleaned_content = bib_block_pattern.sub(process_bib_block, cleaned_content)
+
 
                 # Publisher Style Replacements
                 cleaned_content = regex_eg.sub("for example", cleaned_content)
@@ -215,6 +329,34 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
             tf.write(title_content)
         temp_files.append(title_path)
         
+        # Consolidated Bibliography
+        if references:
+            print(f"  Consolidating {len(references)} unique references...")
+            bib_content = "\n\\newpage\n\\section*{References}\n\\begin{description}\n"
+            
+            # Sort references by key or appearance? Let's sort simply by key for stability, or keep order?
+            # Creating a simple list. O'Reilly style usually list them.
+            # Using description list to handle the lack of automatic numbering if we want, 
+            # OR standard bibliography.
+            # Let's use a standard itemize or description since we stripped the \bibitem wrapper.
+            # Actually, standard latex bibliography is easier if we want that look.
+            
+            bib_content = "\n\\newpage\n\\section*{References}\n\\begin{itemize}\n"
+            
+            for key, text in references.items():
+                # O'Reilly style: usually just the text. 
+                # If text starts with Author, formatted.
+                bib_content += f"\\item {text}\n"
+            
+            bib_content += "\\end{itemize}\n"
+            
+            fd_bib, bib_path = tempfile.mkstemp(suffix='.tex', text=True)
+            with os.fdopen(fd_bib, 'w', encoding='utf-8') as tf:
+                tf.write(bib_content)
+            temp_files.append(bib_path)
+            # Add to final files
+            cleaned_chapter_files.append(bib_path)
+
         final_files = [title_path] + cleaned_chapter_files
         
         sanitized_title = "".join(c for c in chapter_title if c.isalnum() or c in (' ', '_', '-')).strip()
@@ -547,11 +689,56 @@ def post_process_docx(docx_path):
                          rFonts.set(qn('w:eastAsiaTheme'), '')
                          rFonts.set(qn('w:cstheme'), '')
 
+    # 1.7 Fix Code Block Borders (Optional, if needed)
+
+    # 1.8 Color [FIGURE DETAIL] paragraphs Red (User Request)
+    # Iterate through all paragraphs in the document
+    try:
+
+        from docx.shared import RGBColor
+        red_color = RGBColor(255, 0, 0)
+        
+        for para in doc.paragraphs:
+            if "[FIGURE DETAIL]" in para.text:
+                # Apply Color to all runs in this paragraph
+                # And remove the marker tag for cleaner look? 
+                # User said "show it in red". Keeping the marker helps identify WHY it is red.
+                # Or we can strip the marker. Let's strip the marker to be cleaner.
+                
+                # Simple text replacement in runs is tricky because text is split.
+                # Easiest way: get full text, clear content, add new run with color.
+                clean_text = para.text.replace("[FIGURE DETAIL]", "").strip()
+                
+                # Clear existing runs
+                p_element = para._element
+                for r in para.runs:
+                    p_element.remove(r._element)
+                
+                # Add new run
+                new_run = para.add_run(clean_text)
+                new_run.font.name = "Lora"
+                new_run.font.size = Pt(11) # Keep standard size or make smaller?
+                new_run.font.color.rgb = red_color
+                
+                # Maybe make it italic/bold if it was a key?
+                if "**" in clean_text:
+                     # Primitive markdown handling if we stripped formatting by replacing text
+                     # If we want to keep bold, we have to retain run structure or re-parse.
+                     # Given the complexity, let's just dump the text in red. 
+                     # The ** will be visible chars. That is acceptable for "fix it" markers.
+                     pass
+
+        print("  Applied Red color to Figure Details.")
+
+    except Exception as e:
+        print(f"  Warning: Could not apply red color to figure details: {e}")
+
     try:
         doc.save(docx_path)
         print("  Publisher Styles applied successfully.")
     except Exception as e:
         print(f"  Error saving styled DOCX: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Convert LaTeX to Publisher Style Docx.")
