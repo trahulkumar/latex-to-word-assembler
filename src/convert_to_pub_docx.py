@@ -120,9 +120,17 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                     target = prefix_map[pmatch.group(1)]
             return target
 
+        def latex_escape(text):
+            if not text: return ""
+            # Escaping backslashes first, then other problematic characters
+            res = text.replace('\\', r'\textbackslash ')
+            res = res.replace('{', r'\{').replace('}', r'\}')
+            res = res.replace('&', r'\&').replace('$', r'\$').replace('_', r'\_')
+            return res
+
         figure_block_pattern = re.compile(
-            r'(\\begin\{figure\}(?:.|\n)*?\\end\{figure\})(\s*%\s*Image Prompt:[^\n]*)?', 
-            re.IGNORECASE | re.MULTILINE
+            r'(\\begin\{figure\}(?:.|\n)*?\\end\{figure\})(\s*(?:%.*(?:\n|$))*)', 
+            re.IGNORECASE
         )
 
         def process_figure_block(match):
@@ -187,6 +195,28 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
             # We prefix with [FIGURE DETAIL] so post-processing can color it red.
             # We use Markdown bold ** for keys.
             
+            # Attempt to extract figure number from filename or label
+            figure_num_str = "X.Y"
+            if g_match:
+                 ref_path = g_match.group(2)
+                 # Try fig_4_1_... -> 4.1
+                 fn_match = re.search(r'fig_(\d+)_(\d+)', os.path.basename(ref_path), re.IGNORECASE)
+                 if fn_match:
+                     figure_num_str = f"{fn_match.group(1)}.{fn_match.group(2)}"
+            
+            # If no filename match, try label: fig:4.1 or fig:chapter_04_01
+            if figure_num_str == "X.Y" and label:
+                 l_match = re.search(r'(\d+)[._](\d+)', label)
+                 if l_match:
+                     figure_num_str = f"{l_match.group(1)}.{l_match.group(2)}"
+
+            # Add the special caption line requested:
+            # "Figure 4.1 - Silent failure versus defensive gate..."
+            # This should follow the [FIGURE DETAIL] block? Or be part of it?
+            # User said: "Right after ...[MISSING IMAGE]... i want to add a caption... [FIGURE DETAIL] Caption: ..."
+            # And then: "This should show up as 'Figure 4.1 - ...'"
+            # So we create a specific line for it.
+            
             details_block = (
                 f"\n\n[FIGURE DETAIL] **Figure Placeholder:** {placeholder_text}\n"
                 f"[FIGURE DETAIL] **Ref Label:** {label}\n"
@@ -195,17 +225,20 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
             
             # Process prompt lines to be distinctive
             for p in prompts:
-                # Escape the % so it appears as text in LaTeX/DOCX, not a comment
-                # Also escape other special latex chars if needed? 
-                # For now, just handling the leading % which effectively hides the line.
-                # Actually, p is the whole line including the %. 
-                # e.g. "% Prompt: ..."
-                # We want it to be "\% Prompt: ..." in the latex source so it renders as "% Prompt: ..."
-                escaped_p = p.replace('%', '\\%')
-                details_block += f"[FIGURE DETAIL] {escaped_p}\n"
+                # Escape the whole line content using our helper
+                # p starts with % usually, e.g. "% GitHub Script Prompt..."
+                clean_p = p.lstrip('%').strip()
+                escaped_p = latex_escape(clean_p)
+                details_block += f"[FIGURE DETAIL] \\% {escaped_p}\n"
 
-            
-            details_block += f"[FIGURE DETAIL] **Caption:** {caption}\n\n"
+            # Add the Caption with specific formatting marker
+            if caption:
+                # Use our manual brace counting result, but maybe clean it?
+                # Captions are already formatted, so we don't escape the whole thing, 
+                # but we do want the and [FIGURE CAPTION] prefix.
+                details_block += f"\n[FIGURE CAPTION] Figure {figure_num_str} - {caption}\n\n"
+            else:
+                details_block += "\n"
 
             # If an image exists, we might want to show it too? 
             # If it's a true placeholder block (as in the example), it likely has a PLACEHOLDER image or fbox.
@@ -214,24 +247,34 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
             # But the request says "Bring the entire figure section... into the final latex... show it in red".
             # Loops like they want the Source/Metadata visible.
             
+            # Process trailing comments (group 2)
+            trailing_block = ""
+            if len(match.groups()) > 1 and match.group(2):
+                extra_comments = match.group(2).strip().split('\n')
+                for c in extra_comments:
+                    if c.strip().startswith('%'):
+                        clean_c = c.strip().lstrip('%').strip()
+                        secure_c = latex_escape(clean_c)
+                        trailing_block += f"\n\n[GITHUB SCRIPT PROMPT] \\% {secure_c}"
+
             if g_match:
                  options = g_match.group(1)
                  ref_path = g_match.group(2)
                  target_file = find_target_image(ref_path)
                  if target_file:
                      # It's a real image. Return the FULL original block with the updated path.
-                     # Do NOT append details_block (red text) for valid images.
+                     # AND append the trailing red comments if any.
                      new_tag = f'\\includegraphics[{options}]{{{target_file}}}' if options else f'\\includegraphics{{{target_file}}}'
                      s, e = g_match.span()
                      new_block = full_block[:s] + new_tag + full_block[e:]
-                     return new_block + prompt_comment
+                     return new_block + trailing_block
                  else:
-                     # Missing image
-                     return f"\n\n**[MISSING IMAGE: {ref_path}]**\n{details_block}"
+                     # Missing image - include details + trailing comments
+                     return f"\n\n**[MISSING IMAGE: {ref_path}]**\n{details_block}{trailing_block}"
 
             
-            # If no graphics match (just fbox/text placeholder), return the details block
-            return details_block
+            # If no graphics match (just fbox/text placeholder), return details + trailing
+            return details_block + trailing_block
 
 
         def resolve_inline_image(match):
@@ -251,6 +294,58 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                 cleaned_content = citation_pattern.sub('', content)
                 cleaned_content = figure_block_pattern.sub(process_figure_block, cleaned_content)
                 cleaned_content = graphics_pattern.sub(resolve_inline_image, cleaned_content)
+
+                # NEW: Handle Listing Captions and Script Prompts
+                # 1. Regex replace Script Prompts (Multi-line)
+                # Capture "% GitHub Script Prompt" and any subsequent lines starting with "%"
+                script_prompt_pattern = re.compile(r'(^\s*% GitHub Script Prompt.*(?:\n\s*%.*)*)', re.MULTILINE)
+                
+                def format_script_prompt(m):
+                    block = m.group(1)
+                    lines = block.split('\n')
+                    formatted_lines = []
+                    for line in lines:
+                        # Strip leading % and whitespace
+                        clean_content = line.strip().lstrip('%').strip()
+                        # ESCAPE for safe LaTeX inclusion
+                        secure_content = latex_escape(clean_content)
+                        # Output as a visible paragraph with marker
+                        # We add \% so it looks like a comment in the final doc, but is visible text
+                        formatted_lines.append(f"\n\n[GITHUB SCRIPT PROMPT] \\% {secure_content}")
+                    return "".join(formatted_lines)
+
+                cleaned_content = script_prompt_pattern.sub(format_script_prompt, cleaned_content)
+                
+                # 2. Regex replace Listing Captions (inside block -> move out)
+                listing_pattern = re.compile(r'(\\begin\{lstlisting\}.*?)(\\end\{lstlisting\})', re.DOTALL)
+                
+                def place_listing_caption(m):
+                    content = m.group(1)
+                    end_tag = m.group(2)
+                    # Find lines matching # Full Listing in the block content
+                    lines = content.split('\n')
+                    new_lines = []
+                    extracted_caption = None
+                    
+                    for line in lines:
+                        if line.strip().startswith('# Full Listing'):
+                            extracted_caption = line.strip()
+                            continue # Remove from block
+                        new_lines.append(line)
+                    
+                    new_block = "\n".join(new_lines)
+                    # Use original tags if they were there (content starts with \begin{lstlisting})
+                    # But actually 'content' group 1 is (\begin{lstlisting}.*?)
+                    replacement = f"{new_block}{end_tag}"
+                    if extracted_caption:
+                        # Strip leading # and whitespace
+                        clean_caption = extracted_caption.lstrip('#').strip()
+                        # Escape problematic characters in caption
+                        safe_caption = latex_escape(clean_caption)
+                        replacement += f"\n\n[LISTING CAPTION] {safe_caption}\n"
+                    return replacement
+
+                cleaned_content = listing_pattern.sub(place_listing_caption, cleaned_content)
 
                 # Remove redundant References headers (since we are consolidating them)
                 cleaned_content = re.sub(r'\\(section|subsection|subsubsection)\*?\{References\}\s*', '', cleaned_content, flags=re.IGNORECASE)
@@ -695,43 +790,122 @@ def post_process_docx(docx_path):
     # Iterate through all paragraphs in the document
     try:
 
-        from docx.shared import RGBColor
+        from docx.shared import RGBColor, Pt
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+
         red_color = RGBColor(255, 0, 0)
         
         for para in doc.paragraphs:
-            if "[FIGURE DETAIL]" in para.text:
-                # Apply Color to all runs in this paragraph
-                # And remove the marker tag for cleaner look? 
-                # User said "show it in red". Keeping the marker helps identify WHY it is red.
-                # Or we can strip the marker. Let's strip the marker to be cleaner.
-                
-                # Simple text replacement in runs is tricky because text is split.
-                # Easiest way: get full text, clear content, add new run with color.
-                clean_text = para.text.replace("[FIGURE DETAIL]", "").strip()
-                
+            txt = para.text.strip()
+            if not txt: continue
+            
+            # Helper to clear and set run text
+            def reset_para_style(paragraph, text, font_name="Lora", font_size=11, color=None, bold=False, italic=False):
                 # Clear existing runs
-                p_element = para._element
-                for r in para.runs:
+                p_element = paragraph._element
+                for r in list(paragraph.runs): # List copy to avoid mutation issues?
                     p_element.remove(r._element)
                 
                 # Add new run
-                new_run = para.add_run(clean_text)
-                new_run.font.name = "Lora"
-                new_run.font.size = Pt(11) # Keep standard size or make smaller?
-                new_run.font.color.rgb = red_color
-                
-                # Maybe make it italic/bold if it was a key?
-                if "**" in clean_text:
-                     # Primitive markdown handling if we stripped formatting by replacing text
-                     # If we want to keep bold, we have to retain run structure or re-parse.
-                     # Given the complexity, let's just dump the text in red. 
-                     # The ** will be visible chars. That is acceptable for "fix it" markers.
-                     pass
+                new_run = paragraph.add_run(text)
+                new_run.font.name = font_name
+                new_run.font.size = Pt(font_size)
+                new_run.font.bold = bold
+                new_run.font.italic = italic
+                if color:
+                    new_run.font.color.rgb = color
+                return new_run
 
-        print("  Applied Red color to Figure Details.")
+            if "[FIGURE DETAIL]" in txt:
+                clean_text = txt.replace("[FIGURE DETAIL]", "").strip()
+                reset_para_style(para, clean_text, color=red_color, font_size=11)
+            
+            elif "[GITHUB SCRIPT PROMPT]" in txt:
+                clean_text = txt.replace("[GITHUB SCRIPT PROMPT]", "").strip()
+                # Remove latex escape if present?
+                if clean_text.startswith("\\%"):
+                    clean_text = "%" + clean_text[2:]
+                
+                reset_para_style(para, clean_text, color=red_color, font_size=10, font_name="Consolas")
+            
+            elif "[LISTING CAPTION]" in txt:
+                # Format: Lora 9 Italic throughout, with "Full Listing X.Y" in Bold
+                clean_text = txt.replace("[LISTING CAPTION]", "").strip()
+                # Ensure we strip any leading # if it somehow made it through
+                clean_text = clean_text.lstrip('#').strip()
+                
+                # We need mixed formatting: Bold part, then Italic part.
+                # Regex for "Full Listing X.Y" or "Full Listing 4.1"
+                match = re.search(r'^(Full Listing \d+(?:\.\d+)?)(.*)', clean_text)
+                
+                # Clear runs first
+                for r in list(para.runs): para._element.remove(r._element)
+                
+                para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+
+                if match:
+                    bold_part = match.group(1)
+                    rest_part = match.group(2)
+                    
+                    r1 = para.add_run(bold_part)
+                    r1.font.name = "Lora"
+                    r1.font.size = Pt(9)
+                    r1.font.bold = True
+                    r1.font.italic = True
+                    
+                    r2 = para.add_run(rest_part)
+                    r2.font.name = "Lora"
+                    r2.font.size = Pt(9)
+                    r2.font.bold = False
+                    r2.font.italic = True
+                else:
+                    # No formatting match, apply base style
+                    r = para.add_run(clean_text)
+                    r.font.name = "Lora"
+                    r.font.size = Pt(9)
+                    r.font.italic = True
+
+            elif "[FIGURE CAPTION]" in txt:
+                # Format: "Figure 4.1 - Title..."
+                # Entire text Lora 9 Italic
+                # "Figure X.Y" part Bold
+                
+                clean_text = txt.replace("[FIGURE CAPTION]", "").strip()
+                
+                # Regex for "Figure X.Y" or "Figure 4.1"
+                match = re.search(r'^(Figure \d+(?:\.\d+)?)(.*)', clean_text)
+                
+                # Clear runs
+                for r in list(para.runs): para._element.remove(r._element)
+                
+                para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+
+                if match:
+                    bold_part = match.group(1)
+                    rest_part = match.group(2)
+                    
+                    r1 = para.add_run(bold_part)
+                    r1.font.name = "Lora"
+                    r1.font.size = Pt(9)
+                    r1.font.bold = True
+                    r1.font.italic = True
+                    
+                    r2 = para.add_run(rest_part)
+                    r2.font.name = "Lora"
+                    r2.font.size = Pt(9)
+                    r2.font.bold = False
+                    r2.font.italic = True
+                else:
+                    r = para.add_run(clean_text)
+                    r.font.name = "Lora"
+                    r.font.size = Pt(9)
+                    r.font.italic = True
+
+
+        print("  Applied Publisher Styles and Formatted Details.")
 
     except Exception as e:
-        print(f"  Warning: Could not apply red color to figure details: {e}")
+        print(f"  Warning: Could not apply publisher styles/details: {e}")
 
     try:
         doc.save(docx_path)
