@@ -348,7 +348,15 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                 cleaned_content = listing_pattern.sub(place_listing_caption, cleaned_content)
 
                 # Remove redundant References headers (since we are consolidating them)
-                cleaned_content = re.sub(r'\\(section|subsection|subsubsection)\*?\{References\}\s*', '', cleaned_content, flags=re.IGNORECASE)
+                # Catch \section{References}, \textbf{References}, \noindent\textbf{References} etc.
+                header_patterns = [
+                    r'\\(section|subsection|subsubsection)\*?\{References\}\s*',
+                    r'\\textbf\{References\}\s*',
+                    r'\\noindent\\textbf\{References\}\s*',
+                    r'\\vspace\{[^}]+\}\s*\\textbf\{References\}\s*'
+                ]
+                for hp in header_patterns:
+                    cleaned_content = re.sub(hp, '', cleaned_content, flags=re.IGNORECASE)
 
 
 
@@ -364,11 +372,47 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                     for key, text in items:
                         # Clean up text (remove newlines, extra spaces)
                         clean_text = " ".join(text.split()).strip()
-                        if key not in references:
+                        if clean_text not in references.values():
                             references[key] = clean_text
                     return "" # Remove the block from the file
 
                 cleaned_content = bib_block_pattern.sub(process_bib_block, cleaned_content)
+
+                # Fallback: Extraction of plain-text references (e.g. Chapter 6)
+                # If we see a list of paragraphs that look like citations at the end of a file
+                # or following a (now removed) References header.
+                
+                # Heuristic: look for lines at the end of the file that look like "Author (Year). Title..."
+                # We'll look for blocks of text that start with common citation patterns.
+                lines = cleaned_content.split('\n')
+                new_content_lines = []
+                in_ref_block = False
+                
+                # Check if there was a reference-like structure at the end
+                # (e.g. starting with \textbf{References} which we removed, or just at the end)
+                # Since we already removed the header, we can look for common citation starts
+                # like "Name, X. (202x)" or similar.
+                
+                potential_refs = []
+                for i, line in enumerate(lines):
+                    # Heuristic for citation: "Name, I. (Year)" or "Name I (Year)"
+                    if re.match(r'^[A-Z][a-z]+,?\s+[A-Z]\.?\s+\(\d{4}\)', line.strip()):
+                        potential_refs.append(i)
+                
+                if potential_refs:
+                    # If we found items that look like references, and they are near the end
+                    first_ref_idx = potential_refs[0]
+                    # Check if it's the latter half of the file (usually references are at the end)
+                    if first_ref_idx > len(lines) * 0.5:
+                        for idx in range(first_ref_idx, len(lines)):
+                            ref_text = lines[idx].strip()
+                            if ref_text:
+                                # Deduplicate by content
+                                if ref_text not in references.values():
+                                    ref_key = f"text_ref_{len(references)}"
+                                    references[ref_key] = ref_text
+                        # Keep only text before the first reference
+                        cleaned_content = "\n".join(lines[:first_ref_idx])
 
 
                 # Publisher Style Replacements
