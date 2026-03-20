@@ -347,22 +347,9 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
 
                 cleaned_content = listing_pattern.sub(place_listing_caption, cleaned_content)
 
-                # Remove redundant References headers (since we are consolidating them)
-                # Catch \section{References}, \textbf{References}, \noindent\textbf{References} etc.
-                header_patterns = [
-                    r'\\(section|subsection|subsubsection)\*?\{References\}\s*',
-                    r'\\textbf\{References\}\s*',
-                    r'\\noindent\\textbf\{References\}\s*',
-                    r'\\vspace\{[^}]+\}\s*\\textbf\{References\}\s*'
-                ]
-                for hp in header_patterns:
-                    cleaned_content = re.sub(hp, '', cleaned_content, flags=re.IGNORECASE)
-
-
-
                 # Reference Extraction
-                # Find \begin{thebibliography}... \end{thebibliography} blocks
-                # Extract bibitems and remove the block from content
+                
+                # 1. First extract bibtex blocks
                 bib_block_pattern = re.compile(r'(\\begin\{thebibliography\}\{.*?\}(.*?)\\end\{thebibliography\})', re.DOTALL)
                 bib_item_pattern = re.compile(r'\\bibitem\{([^}]+)\}(.*?)(?=\\bibitem|\Z)', re.DOTALL)
 
@@ -378,41 +365,47 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
 
                 cleaned_content = bib_block_pattern.sub(process_bib_block, cleaned_content)
 
-                # Fallback: Extraction of plain-text references (e.g. Chapter 6)
-                # If we see a list of paragraphs that look like citations at the end of a file
-                # or following a (now removed) References header.
+                # 2. Extract plain-text references following a References header
+                # We look for the References header and take everything after it.
+                # Headers might be preceded by \vspace, \newpage, etc.
+                ref_header_pattern = re.compile(
+                    r'(?:\\vspace\{[^}]+\}\s*)?(?:\\noindent\s*)?(?:\\textbf\{References\}|\\(?:section|subsection|subsubsection)\*?\{References\})\s*(.*)', 
+                    re.IGNORECASE | re.DOTALL
+                )
                 
-                # Heuristic: look for lines at the end of the file that look like "Author (Year). Title..."
-                # We'll look for blocks of text that start with common citation patterns.
-                lines = cleaned_content.split('\n')
-                new_content_lines = []
-                in_ref_block = False
-                
-                # Check if there was a reference-like structure at the end
-                # (e.g. starting with \textbf{References} which we removed, or just at the end)
-                # Since we already removed the header, we can look for common citation starts
-                # like "Name, X. (202x)" or similar.
-                
-                potential_refs = []
-                for i, line in enumerate(lines):
-                    # Heuristic for citation: "Name, I. (Year)" or "Name I (Year)"
-                    if re.match(r'^[A-Z][a-z]+,?\s+[A-Z]\.?\s+\(\d{4}\)', line.strip()):
-                        potential_refs.append(i)
-                
-                if potential_refs:
-                    # If we found items that look like references, and they are near the end
-                    first_ref_idx = potential_refs[0]
-                    # Check if it's the latter half of the file (usually references are at the end)
-                    if first_ref_idx > len(lines) * 0.5:
-                        for idx in range(first_ref_idx, len(lines)):
-                            ref_text = lines[idx].strip()
-                            if ref_text:
-                                # Deduplicate by content
-                                if ref_text not in references.values():
-                                    ref_key = f"text_ref_{len(references)}"
-                                    references[ref_key] = ref_text
-                        # Keep only text before the first reference
-                        cleaned_content = "\n".join(lines[:first_ref_idx])
+                ref_match = ref_header_pattern.search(cleaned_content)
+                if ref_match:
+                    ref_text_block = ref_match.group(1)
+                    # The content before the match is kept
+                    cleaned_content = cleaned_content[:ref_match.start()].strip()
+                    
+                    # Process lines in the reference block
+                    ref_lines = ref_text_block.split('\n')
+                    for line in ref_lines:
+                        line = line.strip()
+                        if line:
+                            # Deduplicate by content
+                            if line not in references.values():
+                                ref_key = f"text_ref_{len(references)}"
+                                references[ref_key] = line
+                else:
+                    # Fallback if no explicit header
+                    lines = cleaned_content.split('\n')
+                    potential_refs = []
+                    for i, line in enumerate(lines):
+                        # Relaxed heuristic: Author list or Corp Author followed by (Year)
+                        if re.match(r'^((?:[A-Z][a-zA-Z\s,&\.]+|[A-Z][a-z]+,?\s+[A-Z]\.?)\s*\(\d{4}\))', line.strip()):
+                            potential_refs.append(i)
+                    if potential_refs:
+                        first_ref_idx = potential_refs[0]
+                        if first_ref_idx > len(lines) * 0.5:
+                            for idx in range(first_ref_idx, len(lines)):
+                                ref_text = lines[idx].strip()
+                                if ref_text:
+                                    if ref_text not in references.values():
+                                        ref_key = f"text_ref_{len(references)}"
+                                        references[ref_key] = ref_text
+                            cleaned_content = "\n".join(lines[:first_ref_idx])
 
 
                 # Publisher Style Replacements
@@ -430,6 +423,10 @@ def convert_book(metadata_path, output_dir, target_chapter=None):
                 cleaned_content = cleaned_content.replace("``", '"').replace("''", '"')
                 cleaned_content = cleaned_content.replace("—", "-")
                 cleaned_content = cleaned_content.replace("**", "")
+
+                # Fix stripped block math delimiters
+                cleaned_content = re.sub(r'(?m)^\s*\[\s*$', r'\\[', cleaned_content)
+                cleaned_content = re.sub(r'(?m)^\s*\]\s*$', r'\\]', cleaned_content)
 
                 fd, temp_path = tempfile.mkstemp(suffix='.tex', text=True)
                 with os.fdopen(fd, 'w', encoding='utf-8') as tf:
